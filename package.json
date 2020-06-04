@@ -1,0 +1,36 @@
+{
+  "name": "ckb-duktape-template",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "demo": "node deploy/app.js",
+    "build": "npx webpack",
+    "rebuild-schema": "moleculec --language - --format json --schema-file ./schema/blockchain.mol > ./schema/blockchain.json && npx moleculec-js -ns ./schema/blockchain.json > ./schema/blockchain-combined.json"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Keith-CY/molecule-javascript-template.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Keith-CY/molecule-javascript-template/issues"
+  },
+  "homepage": "https://github.com/Keith-CY/molecule-javascript-template#readme",
+  "dependencies": {
+    "@nervosnetwork/ckb-sdk-core": "^0.30.0",
+    "crc32": "^0.2.2",
+    "jsbi": "^3.1.2",
+    "lodash": "^4.17.15",
+    "molecule-javascript": "0.1.5"
+  },
+  "devDependencies": {
+    "@babel/core": "7.8.4",
+    "@babel/preset-env": "7.8.4",
+    "babel-loader": "8.0.6",
+    "webpack": "4.41.6",
+    "webpack-cli": "3.3.11"
+  }
+}
