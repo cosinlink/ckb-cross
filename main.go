@@ -16,7 +16,10 @@ import (
 	"github.com/ququzone/ckb-sdk-go/utils"
 )
 
+// cost capacity of single cell
+const CellCapacity = 20000000000000
 const Fee = 100000000
+const IssueSudtAmount uint64 = 6543421
 const privateKey = "d00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb97593d2bc"
 const bPrivKey = "d00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb97593d2b0"
 const SimpleUdtFilePath = "./deps/simple_udt"
@@ -27,13 +30,19 @@ type Config struct {
 	SimpleUdtBinary []byte
 	SimpleUdtHash   types.Hash
 
-	M2CTypeScriptBinary []byte
-	M2CTypeScriptHash   types.Hash
+	M2CTypeScriptBinary   []byte
+	M2CTypeScriptCodeHash types.Hash
+	M2CTypeScript         *types.Script
 
-	C2MLockScriptBinary []byte
-	C2MLockScriptHash   types.Hash
+	C2MLockScriptBinary   []byte
+	C2MLockScriptCodeHash types.Hash
+	C2MLockScript         *types.Script
 
-	CodeTxHash types.Hash
+	DeploySudtOutPoint    *types.OutPoint
+	C2MLockCodeTxOutPoint *types.OutPoint
+	M2CTypeCodeTxOutPoint *types.OutPoint
+	IssueSudtOutPoint     *types.OutPoint
+	UdtTypeScript         *types.Script
 }
 
 func main() {
@@ -51,8 +60,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-
-	err = waitForTx(client, config.CodeTxHash)
+	err = waitForTx(client, config.DeploySudtOutPoint.TxHash)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -61,6 +69,101 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	err = waitForTx(client, config.IssueSudtOutPoint.TxHash)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = LockToC2MLockScript(config, client, bPrivKey, 3421)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+}
+
+func LockToC2MLockScript(config *Config, client rpc.Client, hexKey string, sudtAmount uint64) error {
+	key, err := secp256k1.HexToKey(hexKey)
+	if err != nil {
+		return err
+	}
+	systemScripts, err := utils.NewSystemScripts(client)
+	if err != nil {
+		log.Fatalf("load system script error: %v", err)
+	}
+	lockScript, err := key.Script(systemScripts)
+	if err != nil {
+		return err
+	}
+
+	// collect utxo cells
+	collector := utils.NewCellCollector(client, lockScript, utils.NewCapacityCellProcessor(CellCapacity+Fee))
+	result, err := collector.Collect()
+	if err != nil {
+		return fmt.Errorf("collect cell error: %v", err)
+	}
+	if result.Capacity < CellCapacity+Fee {
+		return fmt.Errorf("insufficient balance: %d", result.Capacity)
+	}
+
+	tx := transaction.NewSecp256k1SingleSigTx(systemScripts)
+
+	// add sudt code cell and C2MLockCode into cellDeps
+	tx.CellDeps = append(tx.CellDeps, &types.CellDep{
+		OutPoint: config.DeploySudtOutPoint,
+		DepType:  types.DepTypeCode,
+	}, &types.CellDep{
+		OutPoint: config.C2MLockCodeTxOutPoint,
+		DepType:  types.DepTypeCode,
+	})
+
+	// pay the cost
+	group, witnessArgs, err := transaction.AddInputsForTransaction(tx, result.Cells)
+	if err != nil {
+		return fmt.Errorf("add inputs to transaction error: %v", err)
+	}
+
+	tx.Inputs = append(tx.Inputs, &types.CellInput{
+		PreviousOutput: config.IssueSudtOutPoint,
+		Since:          0,
+	})
+
+	hash, err := config.M2CTypeScript.Hash()
+	if err != nil {
+		return fmt.Errorf("M2CTypeScript.Hash() error: %v", err)
+	}
+
+	tx.Outputs = append(tx.Outputs,
+		&types.CellOutput{
+			Capacity: CellCapacity,
+			Lock: &types.Script{
+				CodeHash: config.C2MLockScriptCodeHash,
+				HashType: types.HashTypeData,
+				Args:     hash[:],
+			},
+			Type: config.UdtTypeScript,
+		},
+
+		// ckb change + udt change
+		&types.CellOutput {
+			Capacity: result.Capacity - CellCapacity - Fee,
+			Lock: lockScript,
+			Type: config.UdtTypeScript,
+		})
+
+	tx.OutputsData = [][]byte{ types.SerializeUint(uint(sudtAmount)), types.SerializeUint(uint(IssueSudtAmount - sudtAmount)) }
+
+	err = transaction.SingleSignTransaction(tx, group, witnessArgs, key)
+	if err != nil {
+		return fmt.Errorf("sign transaction error: %v", err)
+	}
+
+	txHash, err := client.SendTransaction(context.Background(), tx)
+	if err != nil {
+		return fmt.Errorf("SendTransaction error: %v", err)
+	}
+
+	log.Println("LockToC2MLockScript txHash: ", txHash.Hex())
+	return nil
 }
 
 func waitForTx(client rpc.Client, txHash types.Hash) error {
@@ -145,7 +248,18 @@ func Deploy(config *Config, client rpc.Client, hexKey string, codeList ...[]byte
 		return fmt.Errorf("SendTransaction error: %v", err)
 	}
 
-	config.CodeTxHash = *txHash
+	config.DeploySudtOutPoint = &types.OutPoint{
+		TxHash: *txHash,
+		Index:  0,
+	}
+	config.M2CTypeCodeTxOutPoint = &types.OutPoint{
+		TxHash: *txHash,
+		Index:  1,
+	}
+	config.C2MLockCodeTxOutPoint = &types.OutPoint{
+		TxHash: *txHash,
+		Index:  2,
+	}
 	log.Println("SendTransaction Deploy: ", hex.EncodeToString(txHash[:]))
 	return nil
 }
@@ -175,9 +289,6 @@ func IssueSudt(config *Config, client rpc.Client, hexKey string) error {
 		return err
 	}
 
-	// cost capacity of sudt cell
-	const CellCapacity = 20000000000000
-
 	// collect utxo cells
 	collector := utils.NewCellCollector(client, adminLockScript, utils.NewCapacityCellProcessor(CellCapacity+Fee))
 	result, err := collector.Collect()
@@ -197,11 +308,8 @@ func IssueSudt(config *Config, client rpc.Client, hexKey string) error {
 
 	// add sudt code cell into cellDeps
 	tx.CellDeps = append(tx.CellDeps, &types.CellDep{
-		OutPoint: &types.OutPoint{
-			TxHash: config.CodeTxHash,
-			Index:  0,
-		},
-		DepType: types.DepTypeCode,
+		OutPoint: config.DeploySudtOutPoint,
+		DepType:  types.DepTypeCode,
 	})
 
 	// admin will pay the cost and receive the change
@@ -230,8 +338,7 @@ func IssueSudt(config *Config, client rpc.Client, hexKey string) error {
 		})
 
 	// set OutputsData
-	var sudtNum uint32 = 6543421
-	tx.OutputsData = [][]byte{types.SerializeUint(uint(sudtNum)), {}}
+	tx.OutputsData = [][]byte{types.SerializeUint(uint(IssueSudtAmount)), {}}
 
 	err = transaction.SingleSignTransaction(tx, group, witnessArgs, adminKey)
 	if err != nil {
@@ -241,6 +348,11 @@ func IssueSudt(config *Config, client rpc.Client, hexKey string) error {
 	txHash, err := client.SendTransaction(context.Background(), tx)
 	if err != nil {
 		return fmt.Errorf("SendTransaction error: %v", err)
+	}
+
+	config.IssueSudtOutPoint = &types.OutPoint{
+		TxHash: *txHash,
+		Index:  0,
 	}
 
 	log.Println("SendTransaction Issue Sudt: ", hex.EncodeToString(txHash[:]))
@@ -279,11 +391,11 @@ func LoadConfig() (*Config, error) {
 		SimpleUdtBinary: data,
 		SimpleUdtHash:   types.BytesToHash(hash),
 
-		M2CTypeScriptBinary: dataM2CType,
-		M2CTypeScriptHash:   types.BytesToHash(hashM2CType),
+		M2CTypeScriptBinary:   dataM2CType,
+		M2CTypeScriptCodeHash: types.BytesToHash(hashM2CType),
 
-		C2MLockScriptBinary: dataC2MLock,
-		C2MLockScriptHash:   types.BytesToHash(hashC2MLock),
+		C2MLockScriptBinary:   dataC2MLock,
+		C2MLockScriptCodeHash: types.BytesToHash(hashC2MLock),
 	}
 
 	return config, nil
