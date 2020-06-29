@@ -2,12 +2,12 @@ package main
 
 import (
 	"fmt"
-	"github.com/ququzone/ckb-sdk-go/types"
-	"log"
 	"github.com/ququzone/ckb-sdk-go/crypto/secp256k1"
-	"github.com/ququzone/ckb-sdk-go/transaction"
-	"github.com/ququzone/ckb-sdk-go/utils"
 	"github.com/ququzone/ckb-sdk-go/rpc"
+	"github.com/ququzone/ckb-sdk-go/transaction"
+	"github.com/ququzone/ckb-sdk-go/types"
+	"github.com/ququzone/ckb-sdk-go/utils"
+	"log"
 )
 
 func GenTxAndCollectCells(client rpc.Client, key *secp256k1.Secp256k1Key, collectAmount uint64) (*types.Transaction, *utils.SystemScripts, *types.Script, *utils.CollectResult, error) {

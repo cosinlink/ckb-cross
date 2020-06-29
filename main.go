@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"github.com/ququzone/ckb-sdk-go/crypto/blake2b"
+	"github.com/ququzone/ckb-sdk-go/utils"
 	"io/ioutil"
 	"log"
 	"time"
@@ -22,7 +23,11 @@ const IssueSudtAmount uint64 = 6543421
 const AdminPrivKey = "d00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb97593d2bc"
 const bPrivKey = "d00c06bfd800d27397002dca6fb0993d5ba6399b4238b2f29ee9deb97593d2b0"
 const SimpleUdtFilePath = "./deps/simple_udt"
-const M2CTypeScriptFilePath = "./deps/always_success"
+
+//const M2CTypeScriptFilePath = "/Users/hyz/CLionProjects/crosschain-scripts/build/crosschain_typescript"
+const M2CTypeScriptFilePath = "/Users/hyz/CLionProjects/crosschain-scripts/build/test_type"
+
+//const M2CTypeScriptFilePath = "./deps/always_success"
 const AlwaysSuccessFilePath = "./deps/always_success"
 const C2MLockScriptFilePath = "./deps/crosschain_lockscript"
 
@@ -48,6 +53,8 @@ type Config struct {
 	M2CTypeCodeTxOutPoint     *types.OutPoint
 	IssueSudtOutPoint         *types.OutPoint
 	AlwaysSuccessCodeOutPoint *types.OutPoint
+	IssueSudtTxHash           *types.Hash
+	DebugTxHash               *types.Hash
 }
 
 func main() {
@@ -66,6 +73,15 @@ func main() {
 		log.Fatal(err)
 	}
 	err = waitForTx(client, config.DeploySudtOutPoint.TxHash)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	err = DebugTypeScript(config, client, AdminPrivKey)
+	if err != nil {
+		log.Fatal(err)
+	}
+	err = waitForTx(client, *config.DebugTxHash)
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -99,6 +115,74 @@ func main() {
 
 }
 
+func DebugTypeScript(config *Config, client rpc.Client, hexKey string) error {
+	key, err := secp256k1.HexToKey(hexKey)
+	if err != nil {
+		return err
+	}
+	tx, _, lockScript, result, err := GenTxAndCollectCells(client, key, CellCapacity+Fee)
+	if err != nil {
+		return err
+	}
+
+	// pay the cost of output cell
+	group, witnessArgs, err := transaction.AddInputsForTransaction(tx, result.Cells)
+	if err != nil {
+		return fmt.Errorf("add inputs to transaction error: %v", err)
+	}
+
+	args, err := tx.Inputs[0].Serialize()
+	if err != nil {
+		return fmt.Errorf("tx.Inputs[0].Serialize() error: %v", err)
+	}
+	config.M2CTypeScript = &types.Script{
+		CodeHash: config.M2CTypeScriptCodeHash,
+		HashType: types.HashTypeData,
+		Args:     args,
+	}
+
+	tx.CellDeps = append(tx.CellDeps,
+		&types.CellDep{
+			OutPoint: config.M2CTypeCodeTxOutPoint,
+			DepType:  types.DepTypeCode,
+		})
+
+	tx.Outputs = append(tx.Outputs,
+		&types.CellOutput{
+			Capacity: CellCapacity,
+			Lock:     lockScript,
+			Type:     config.M2CTypeScript,
+		},
+
+		&types.CellOutput{
+			Capacity: CellCapacity,
+			Lock:     lockScript,
+			Type:     config.M2CTypeScript,
+		},
+
+		&types.CellOutput{
+			Capacity: result.Capacity - CellCapacity*2 - Fee,
+			Lock:     lockScript,
+		})
+
+	tx.OutputsData = [][]byte{{}, {}, {}}
+
+	err = transaction.SingleSignTransaction(tx, group, witnessArgs, key)
+	if err != nil {
+		return fmt.Errorf("sign transaction error: %v", err)
+	}
+
+	txHash, err := client.SendTransaction(context.Background(), tx)
+	if err != nil {
+		return fmt.Errorf("SendTransaction error: %v", err)
+	}
+
+	config.DebugTxHash = txHash
+	log.Println("DebugTypeScript txHash: ", txHash.Hex())
+
+	return nil
+}
+
 func waitForTx(client rpc.Client, txHash types.Hash) error {
 	log.Println("wait for tx: ", txHash.Hex())
 	for {
@@ -118,7 +202,7 @@ func waitForTx(client rpc.Client, txHash types.Hash) error {
 			break
 		}
 
-		time.Sleep(time.Second)
+		time.Sleep(2 * time.Second)
 	}
 	return nil
 }
@@ -272,6 +356,63 @@ func IssueSudt(config *Config, client rpc.Client, hexKey string) error {
 	return nil
 }
 
+func TestSudtTransfer(config *Config, client rpc.Client, hexKey string, sudtAmount uint64) error {
+	key, err := secp256k1.HexToKey(hexKey)
+	if err != nil {
+		return err
+	}
+
+	tx, _, lockScript, result, err := GenTxAndCollectCells(client, key, CellCapacity*10)
+	if err != nil {
+		return err
+	}
+
+	// pay the cost and receive the change
+	group, witnessArgs, err := transaction.AddInputsForTransaction(tx, result.Cells)
+	if err != nil {
+		return fmt.Errorf("add inputs to transaction error: %v", err)
+	}
+	tx.CellDeps = append(tx.CellDeps,
+		&types.CellDep{
+			OutPoint: config.AlwaysSuccessCodeOutPoint,
+			DepType:  types.DepTypeCode,
+		},
+		&types.CellDep{
+			OutPoint: config.IssueSudtOutPoint,
+			DepType:  types.DepTypeCode,
+		})
+
+	tx.Outputs = append(tx.Outputs,
+		&types.CellOutput{
+			Capacity: CellCapacity,
+			Lock:     config.AlwaysSuccessScript,
+			Type:     config.UdtTypeScript,
+		},
+
+		// ckb change + udt change
+		&types.CellOutput{
+			Capacity: result.Capacity - CellCapacity - Fee,
+			Lock:     lockScript,
+			Type:     config.UdtTypeScript,
+		})
+
+	tx.OutputsData = [][]byte{types.SerializeUint(uint(sudtAmount)), types.SerializeUint(uint(IssueSudtAmount - sudtAmount))}
+
+	err = transaction.SingleSignTransaction(tx, group, witnessArgs, key)
+	if err != nil {
+		return fmt.Errorf("sign transaction error: %v", err)
+	}
+
+	txHash, err := client.SendTransaction(context.Background(), tx)
+	if err != nil {
+		return fmt.Errorf("SendTransaction error: %v", err)
+	}
+
+	config.IssueSudtTxHash = txHash
+	log.Println("TestSudtTransfer txHash: ", txHash.Hex())
+	return nil
+}
+
 func LoadConfig() (*Config, error) {
 	data, err := ioutil.ReadFile(SimpleUdtFilePath)
 	if err != nil {
@@ -291,8 +432,8 @@ func LoadConfig() (*Config, error) {
 		return nil, err
 	}
 
-	dataM2CType := dataAlwaysSuccess
-	//dataM2CType, err := ioutil.ReadFile(M2CTypeScriptFilePath)
+	//dataM2CType := dataAlwaysSuccess
+	dataM2CType, err := ioutil.ReadFile(M2CTypeScriptFilePath)
 	if err != nil {
 		return nil, err
 	}
@@ -400,10 +541,11 @@ func LockToC2MLockScript(config *Config, client rpc.Client, hexKey string, sudtA
 	if err != nil {
 		return err
 	}
-	tx, _, lockScript, result, err := GenTxAndCollectCells(client, key, CellCapacity*2 + Fee)
+	systemScripts, err := utils.NewSystemScripts(client)
 	if err != nil {
 		return err
 	}
+	tx := transaction.NewSecp256k1SingleSigTx(systemScripts)
 
 	// add sudt code cell and C2MLockCode into cellDeps
 	tx.CellDeps = append(tx.CellDeps, &types.CellDep{
@@ -414,11 +556,13 @@ func LockToC2MLockScript(config *Config, client rpc.Client, hexKey string, sudtA
 		DepType:  types.DepTypeCode,
 	})
 
-	result.Cells = append(result.Cells, &types.Cell{
-		OutPoint: config.IssueSudtOutPoint,
-	})
+	inputCells := []*types.Cell{
+		&types.Cell{
+			OutPoint: config.IssueSudtOutPoint,
+		}}
+
 	// pay the cost
-	group, witnessArgs, err := transaction.AddInputsForTransaction(tx, result.Cells)
+	group, witnessArgs, err := transaction.AddInputsForTransaction(tx, inputCells)
 	if err != nil {
 		return fmt.Errorf("add inputs to transaction error: %v", err)
 	}
@@ -435,19 +579,12 @@ func LockToC2MLockScript(config *Config, client rpc.Client, hexKey string, sudtA
 	}
 	tx.Outputs = append(tx.Outputs,
 		&types.CellOutput{
-			Capacity: CellCapacity,
-			Lock: config.C2MLockScript,
-			Type: config.UdtTypeScript,
-		},
-
-		// ckb change + udt change
-		&types.CellOutput{
-			Capacity: result.Capacity - CellCapacity - Fee,
-			Lock:     lockScript,
+			Capacity: CellCapacity - Fee,
+			Lock:     config.C2MLockScript,
 			Type:     config.UdtTypeScript,
 		})
 
-	tx.OutputsData = [][]byte{types.SerializeUint(uint(sudtAmount)), types.SerializeUint(uint(IssueSudtAmount - sudtAmount))}
+	tx.OutputsData = [][]byte{types.SerializeUint(uint(IssueSudtAmount))}
 
 	err = transaction.SingleSignTransaction(tx, group, witnessArgs, key)
 	if err != nil {
